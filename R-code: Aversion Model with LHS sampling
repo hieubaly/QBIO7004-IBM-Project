@@ -1,0 +1,278 @@
+# Simple Simulation of Cane Toad Taste Aversion Training of Quolls
+# A rough parameter screening using Latin Hyper cube sampling to test dynamics of the model
+# Authors: Hieu Ly
+# Date: 14/05/2024
+
+### Step 1: obtain batch number from command line prompt ----
+args <- commandArgs(trailingOnly = TRUE)
+
+if (length(args) < 1) { # no arguments provided
+  stop("Parameter for batch number needs to be provided.")
+} else {
+  batch <- as.integer(args[1])
+}
+
+### Step 2: Run Simulation ----
+
+library(dplyr)
+library(tidyverse)
+library(tidyr)
+library(ggplot2)
+library(grid)
+library(lhs)
+library(DoE.wrapper)
+
+# Parameters bundled into a list 
+p <- list()
+p$environment_x <- 200  # X axis of environment
+p$environment_y <- 200  # Y axis of environment
+
+p$n_toads <- 100         # Number of toads 
+p$n_quolls <- 40        # Number of quolls
+p$speed_toads <- 5      # Speed of toads
+p$speed_quolls <- 5     # Speed of quolls 
+
+p$encounter_distance <- 3         # Distance required between agents to encounter 
+p$encounter_probability <- 0.8    # Probability of encounter occurring given encounter distance
+
+p$quoll_mortality_probability <- 0.5  # Probability of quoll dying during encounter
+p$toad_mortality_probability <- 0.5   # Probability of toad dying during encounter
+
+p$n_bait <-                           # Number of bait
+p$train_probability <- 1              # Probability of training a quoll after encounter with bait
+p$trained_encounter_probability <- 0.1   # Probability of a quoll preying on a toad after being trained
+
+simulation_time <- 365
+
+# Functions
+# Function to simulate agent movement
+simulate_movement <- function(agent_population, p) {
+  # Generate random direction of movement 
+  # Update alive toad coordinates based on direction and speed
+  for (i in 1:nrow(agent_population$toad_data[[1]])) {
+    direction <- runif(length(agent_population$toad_data[[1]]$x[i]), min = 0, max = 2*pi)
+    if (agent_population$toad_data[[1]][i,]$alive == 1) {
+      agent_population$toad_data[[1]]$x[i] <- agent_population$toad_data[[1]]$x[i] + p$speed_toad * cos(direction)
+      agent_population$toad_data[[1]]$y[i] <- agent_population$toad_data[[1]]$y[i] + p$speed_toad * sin(direction)
+      agent_population$toad_data[[1]]$x[i] <- pmin(pmax(agent_population$toad_data[[1]]$x[i], 0), p$environment_x) # x does not fall below 0 or exceed environment_y
+      agent_population$toad_data[[1]]$y[i] <- pmin(pmax(agent_population$toad_data[[1]]$y[i], 0), p$environment_y) # y does not fall below 0 or exceed environment_y
+    }
+  }
+  # Update alive quoll coordinates based on direction and speed
+  for (i in 1:nrow(agent_population$quoll_data[[1]])) {
+    direction <- runif(length(agent_population$quoll_data[[1]]$x[i]), min = 0, max = 2*pi)
+    if (agent_population$quoll_data[[1]][i,]$alive == 1) {
+      agent_population$quoll_data[[1]]$x[i] <- agent_population$quoll_data[[1]]$x[i] + p$speed_quolls * cos(direction)
+      agent_population$quoll_data[[1]]$y[i] <- agent_population$quoll_data[[1]]$y[i] + p$speed_quolls * sin(direction)
+      agent_population$quoll_data[[1]]$x[i] <- pmin(pmax(agent_population$quoll_data[[1]]$x[i], 0), p$environment_x) 
+      agent_population$quoll_data[[1]]$y[i] <- pmin(pmax(agent_population$quoll_data[[1]]$y[i], 0), p$environment_y) 
+    }
+  }
+  return(agent_population)
+}
+
+# Function to calculate quoll-toad encounters based on potential encounter distance 
+#and an encounter probability or trained encounter probability
+calculate_toad_encounter <- function(toad, quoll, p) {
+  distance <- sqrt((toad$x - quoll$x)^2 + (toad$y - quoll$y)^2) # calculate distance between agents
+  if (quoll$trained) {
+    encounter_chance <- runif(1) <= p$trained_encounter_probability
+  }
+  else {
+    encounter_chance <- runif(1) <= p$encounter_probability
+  }
+  return(list(toad_id = toad$toad_id,
+              quoll_id = quoll$quoll_id,
+              encountered = ifelse(distance <= p$encounter_distance & encounter_chance, 1, 0)))
+}
+
+# Function to calculate quoll-bait encounters
+calculate_bait_encounter <- function(bait, quoll) {
+  distance <- sqrt((bait$x - quoll$x)^2 + (bait$y - quoll$y)^2) # calculate distance between quoll and bait
+  if (quoll$trained){
+    encounter_chance <- runif(1) <= p$trained_encounter_probability
+  } else {
+    encounter_chance <- runif(1) <= p$encounter_probability
+  }
+  return(list(bait_id = bait$bait_id,
+              quoll_id = quoll$quoll_id,
+              encountered = ifelse(distance <= p$encounter_distance & encounter_chance, 1, 0)))
+}
+
+# Function to simulate agent mortality during encounter
+simulate_agent_mortality <- function(encounter_matrix, alive_toad_population, alive_quoll_population) {
+  for (i in 1:nrow(encounter_matrix)) {
+    for (j in 1:ncol(encounter_matrix)) {
+      if (encounter_matrix[i, j]) {
+        if (runif(1) < p$toad_mortality_probability) {
+          alive_toad_population$alive[i] <- 0
+        }
+        if (runif(1) < p$quoll_mortality_probability) {
+          alive_quoll_population$alive[j] <- 0
+        }
+      }
+    }
+  }
+  return (list(toad_pop = alive_toad_population, quoll_pop = alive_quoll_population))
+}
+
+# Function to simulate trained quolls and bait depletion
+simulate_aversion <- function(bait_encounter_matrix, active_bait_pop, alive_quoll_pop) {
+  for (i in 1:nrow(bait_encounter_matrix)) {
+    for (j in 1:ncol(bait_encounter_matrix)) {
+      if (bait_encounter_matrix[i, j]) {
+        train_chance = runif(1)
+        if (train_chance < p$train_probability) {
+          active_bait_pop$active[i] <- 0
+          alive_quoll_pop$trained[j] <- 1
+        }
+      }
+    }
+  }
+  return (list(bait_pop = active_bait_pop, quoll_pop = alive_quoll_pop)) 
+}
+
+# Core Simulation loop 
+
+simulate_trained_quoll_toad_encounters <- function(num_baits, trained_encounter_probability) {
+  
+  print(sprintf("Parameters: %s %s", num_baits,trained_encounter_probability))
+  
+  p$n_bait <- num_baits
+  p$trained_encounter_probability <- trained_encounter_probability
+  
+  ini_toad_population <- tibble(
+    toad_id = 1:p$n_toads,
+    x = runif(p$n_toads, min = 0, max = p$environment_x),
+    y = runif(p$n_toads, min = 0, max = p$environment_y),
+    alive = 1)
+  
+  ini_quoll_population <- tibble(
+    quoll_id = 1:p$n_quolls,
+    x = runif(p$n_quolls, min = 0, max = p$environment_x),
+    y = runif(p$n_quolls, min = 0, max = p$environment_y),
+    alive = 1,
+    trained = 0)
+  
+  ini_bait_population <- tibble(
+    bait_id = 1:p$n_bait,
+    x = runif(p$n_bait, min = 0, max = p$environment_x),
+    y = runif(p$n_bait, min = 0, max = p$environment_x),
+    active = 1)
+  
+  # "Habitat Through Time"
+  htt <- tibble(time_step = 0,
+                quoll_data = list(ini_quoll_population),
+                toad_data = list(ini_toad_population),
+                bait_data = list(ini_bait_population),
+                num_encounters = 0,
+                toads = sum(ini_toad_population$alive),
+                untrained_quolls = sum(ini_quoll_population$alive & ini_quoll_population$trained == 0),
+                trained_quolls = sum(ini_quoll_population$alive & ini_quoll_population$trained == 1))
+  overall_encounters = 0
+  
+  # Take last variables from last time step
+  for (t in 1:simulation_time) {
+    last_agent_population <- tail(htt, 1)
+    
+    # Simulate movement of agents
+    moved_population <- simulate_movement(last_agent_population, p)
+    
+    # Calculate encounter for each pair of alive agents
+    if (sum(moved_population$quoll_data[[1]]$alive) > 1) {
+    alive_quoll_population <- filter(moved_population$quoll_data[[1]], alive == 1)
+    alive_toad_population <- filter(moved_population$toad_data[[1]], alive == 1)
+    toad_encounter_matrix <- matrix(0, p$n_toads, p$n_quolls)
+    for (i in 1:nrow(alive_toad_population)) { 
+      for (j in 1:nrow(alive_quoll_population)) { 
+        agent_id_encounter_data <- calculate_toad_encounter(alive_toad_population[i,], alive_quoll_population[j,], p)
+        toad_encounter_matrix[agent_id_encounter_data$toad_id, agent_id_encounter_data$quoll_id] <- agent_id_encounter_data$encountered
+        }
+      }
+    } else {
+      result <- (ggplot(htt, aes(time_step)) +
+                   geom_line(aes(y = untrained_quolls, col = "Untrained Quolls")) +
+                   geom_line(aes(y = trained_quolls, col = "Trained Quolls")) +
+                   geom_line(aes(y = toads, col = "Toads")) +
+                   labs(x = "Time Step", y = "Number of Individuals", title = "Taste Aversion Training in Quoll Populations Over Time") +
+                   labs(tag = paste0("bait = ", num_baits, "  ", "p(trained encounter) =", trained_encounter_probability)) +
+                   theme(plot.tag.position = c(0.75 , 0.95 ))
+      )
+      return(result)
+    }
+    # Update alive status of quolls and toads
+    new_population <- simulate_agent_mortality(toad_encounter_matrix, moved_population$toad_data[[1]], moved_population$quoll_data[[1]])
+    alive_quoll_population <- filter(moved_population$quoll_data[[1]], alive == 1)
+    
+    # Calculate quoll encounters with bait 
+    active_bait_population <- filter(moved_population$bait_data[[1]], active == 1)
+    bait_encounter_matrix <- matrix(0, p$n_bait, p$n_quolls)
+    for (i in 1:nrow(active_bait_population)) {
+      for (j in 1:nrow(alive_quoll_population)) {
+        bait_id_encounter_data <- calculate_bait_encounter(active_bait_population[i,], alive_quoll_population[j,])
+        bait_encounter_matrix[bait_id_encounter_data$bait_id, bait_id_encounter_data$quoll_id] <- bait_id_encounter_data$encountered
+      }
+    }
+    # Update active status of bait and trained quolls
+    bait_trained_population <- simulate_aversion(bait_encounter_matrix, moved_population$bait_data[[1]], new_population$quoll_pop)
+    
+    # Update results and add new results row to htt tibble
+    overall_encounters <- overall_encounters + sum(toad_encounter_matrix)
+    
+    new_row <- tibble(time_step = t,
+                      quoll_data = list(bait_trained_population$quoll_pop),
+                      toad_data = list(new_population$toad_pop),
+                      bait_data = list(bait_trained_population$bait_pop),
+                      num_encounters = overall_encounters,
+                      toads = sum(new_population$toad_pop$alive),
+                      untrained_quolls = sum(bait_trained_population$quoll_pop$alive & bait_trained_population$quoll_pop$trained == 0),
+                      trained_quolls = sum(bait_trained_population$quoll_pop$alive & bait_trained_population$quoll_pop$trained == 1))
+   
+    htt <- add_row(htt, new_row)
+    
+    # Print time step
+    print_format <- sprintf("Day: %s/%s", t, simulation_time)
+    
+    ifelse(t != simulation_time, print_format <- paste(print_format, "\r"), print_format <- paste(print_format, "\n"))
+    cat(print_format)
+  }
+  result <- (ggplot(htt, aes(time_step)) +
+               geom_line(aes(y = untrained_quolls, col = "Untrained Quolls")) +
+               geom_line(aes(y = trained_quolls, col = "Trained Quolls")) +
+               geom_line(aes(y = toads, col = "Toads")) +
+               labs(x = "Time Step", y = "Number of Individuals", title = "Taste Aversion Training in Quoll Populations Over Time") +
+               labs(tag = paste0("bait = ", num_baits, "  ", "p(trained encounter) =", trained_encounter_probability)) +
+               theme(plot.tag.position = c(0.75 , 0.95 ))
+             )
+  return(result)
+}
+
+# Run Parameter screen 
+
+# Parameter screening: Latin Hypercube sampling+
+# Screening for bait numbers from 1-200, i.e., amount of baits to be put on the field
+# Screening for trained_encounter_probability, i.e., strength of CTA training of the quolls 
+# (how sick the quolls get from bait)
+
+lhc <- lhs.design(
+  nruns = 50,
+  nfactors = 2,
+  type = "maximin",
+  factor.names = list(
+    "num_baits" = c(1, 200),
+    "trained_encounter_probability" = c(0, 0.79))
+)
+
+# Change number of baits to integer
+lhc$num_baits <- as.integer(lhc$num_baits)
+# Round trained encounter probability
+lhc$trained_encounter_probability <- round(lhc$trained_encounter_probability, 2)
+
+# For loops for each sample of LHC screening different number of baits used and probability of trained encounter
+for (i in 1:nrow(lhc)) {
+  params <- lhc[i,]
+  graph <- simulate_trained_quoll_toad_encounters(params[[1]], params[[2]])
+  ggsave(paste0("Plot_", i, ".jpg"))
+}
+
+
