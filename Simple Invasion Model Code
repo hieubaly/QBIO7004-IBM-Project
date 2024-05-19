@@ -1,0 +1,189 @@
+# Simple Simulation of cane toad and quoll encounters 
+# Authors: Hieu Ly
+# Date: 14/05/2024
+
+library(tidyverse)
+library(dplyr)
+
+set.seed(40)
+
+### Parameter bundled into a list ----
+p <- list()
+p$environment_x <- 200  # X axis of environment
+p$environment_y <- 200  # Y axis of environment
+
+p$n_toads <- 50         # Number of toads 
+p$n_quolls <- 20        # Number of quolls
+p$speed_toad <- 5       # Speed of toads
+p$speed_quolls <- 5     # Speed of quolls 
+
+p$encounter_distance <- 3         # Distance required between agents to encounter 
+p$encounter_probability <- 0.8    # Probability of encounter occurring given encounter distance
+
+p$quoll_mortality_probability <- 0.6  # Probability of quoll dying during encounter
+p$toad_mortality_probability <- 0.8   # Probability of toad dying during encounterr
+
+simulation_time <- 300
+
+### Initial quoll and toad populations ----
+ini_toad_population <- tibble(
+  toad_id = 1:p$n_toads,
+  x = runif(p$n_toads, min = 0, max = p$environment_x),
+  y = runif(p$n_toads, min = 0, max = p$environment_y),
+  alive = 1
+)
+
+ini_quoll_population <- tibble(
+  quoll_id = 1:p$n_quolls,
+  x = runif(p$n_quolls, min = 0, max = p$environment_x),
+  y = runif(p$n_quolls, min = 0, max = p$environment_y),
+  alive = 1
+)
+
+### Functions ----
+
+simulate_movement <- function(agent_population, p) {
+  # Generate random direction of movement 
+  # Update alive toad coordinates based on direction and speed
+  for (i in 1:nrow(agent_population$toad_data[[1]])) {
+    direction <- runif(length(agent_population$toad_data[[1]]$x[i]), min = 0, max = 2*pi)
+    if (agent_population$toad_data[[1]][i,]$alive == 1) {
+      agent_population$toad_data[[1]]$x[i] <- agent_population$toad_data[[1]]$x[i] + p$speed_toad * cos(direction)
+      agent_population$toad_data[[1]]$y[i] <- agent_population$toad_data[[1]]$y[i] + p$speed_toad * sin(direction)
+      agent_population$toad_data[[1]]$x[i] <- pmin(pmax(agent_population$toad_data[[1]]$x[i], 0), p$environment_x) # x does not fall below 0 or exceed environment_y
+      agent_population$toad_data[[1]]$y[i] <- pmin(pmax(agent_population$toad_data[[1]]$y[i], 0), p$environment_y) # y does not fall below 0 or exceed environment_y
+    }
+  }
+  # Update alive quoll coordinates based on direction and speed
+  for (i in 1:nrow(agent_population$quoll_data[[1]])) {
+    direction <- runif(length(agent_population$quoll_data[[1]]$x[i]), min = 0, max = 2*pi)
+    if (agent_population$quoll_data[[1]][i,]$alive == 1) {
+      agent_population$quoll_data[[1]]$x[i] <- agent_population$quoll_data[[1]]$x[i] + p$speed_quolls * cos(direction)
+      agent_population$quoll_data[[1]]$y[i] <- agent_population$quoll_data[[1]]$y[i] + p$speed_quolls * sin(direction)
+      agent_population$quoll_data[[1]]$x[i] <- pmin(pmax(agent_population$quoll_data[[1]]$x[i], 0), p$environment_x) 
+      agent_population$quoll_data[[1]]$y[i] <- pmin(pmax(agent_population$quoll_data[[1]]$y[i], 0), p$environment_y) 
+    }
+  }
+  return(agent_population)
+}
+
+# Function to calculate encounters based on potential encounter distance and an encounter probability
+calculate_encounter <- function(toad, quoll, encounter_distance, encounter_probability) {
+  distance <- sqrt((toad$x - quoll$x)^2 + (toad$y - quoll$y)^2) # calculate distance between agents 
+  encounter_chance <- runif(1) <= encounter_probability
+  return(list(toad_id = toad$toad_id,
+              quoll_id = quoll$quoll_id,
+              encountered = ifelse(distance <= encounter_distance & encounter_chance, 1, 0)))
+}
+
+# Function to simulate agent mortality given an encounter occurring 
+simulate_agent_mortality <- function(encounter_matrix, alive_toad_population, alive_quoll_population) {
+  for (i in 1:nrow(encounter_matrix)) {
+    for (j in 1:ncol(encounter_matrix)) {
+      if (encounter_matrix[i, j]) {
+        if (runif(1) < p$toad_mortality_probability) {
+          alive_toad_population$alive[i] <- 0
+        }
+        if (runif(1) < p$quoll_mortality_probability) {
+          alive_quoll_population$alive[j] <- 0
+        }
+      }
+    }
+  }
+  return (list(toad_pop = alive_toad_population, quoll_pop = alive_quoll_population))
+}
+
+### Core simulation function ----
+
+simulate_quoll_toad_encounters <- function(ini_quoll_population, ini_toad_population, p, simulation_time) {
+  htt <- tibble(time_step = 0, # "Habitat Through Time"
+                    quoll_data = list(ini_quoll_population),
+                    toad_data = list(ini_toad_population),
+                    num_encounters = 0,
+                    alive_quolls = sum(ini_quoll_population$alive),
+                    alive_toads = sum(ini_toad_population$alive))
+  
+  overall_encounters = 0
+
+  for (t in 1:simulation_time) {
+    last_agent_population <- tail(htt, 1)
+    
+    # Simulate movement of alive agents
+    moved_population <- simulate_movement(last_agent_population, p)
+
+    ## Calculate encounters for each pair of individuals
+    # Store alive quoll and toads in new object
+    alive_quoll_population <- filter(moved_population$quoll_data[[1]], alive == 1)
+    alive_toad_population <- filter(moved_population$toad_data[[1]], alive == 1)
+
+    encounter_matrix <- matrix(0, nrow = p$n_toads, ncol = p$n_quolls)
+    for (i in 1:nrow(alive_toad_population)) {
+      for (j in 1:nrow(alive_quoll_population)) {
+        agent_id_encounter_data <- calculate_encounter(alive_toad_population[i,], alive_quoll_population[j,], p$encounter_distance, p$encounter_probability)
+        encounter_matrix[agent_id_encounter_data$toad_id, agent_id_encounter_data$quoll_id] <- agent_id_encounter_data$encountered
+      }
+    }
+    
+    # Update alive status of quoll and toads based on encounters 
+    new_population <- simulate_agent_mortality(encounter_matrix, moved_population$toad_data[[1]], moved_population$quoll_data[[1]])
+    
+    # Update results 
+    overall_encounters <- overall_encounters + sum(encounter_matrix)
+    new_row <- tibble(time_step = t,
+                      quoll_data = list(new_population$quoll_pop),
+                      toad_data = list(new_population$toad_pop),
+                      num_encounters = overall_encounters,
+                      alive_quolls = sum(new_population$quoll_pop$alive),
+                      alive_toads = sum(new_population$toad_pop$alive))
+    
+    htt <- add_row(htt, new_row)
+    print(t)
+  }
+  return(htt)
+}
+
+final_invasion_population_encounter <- simulate_quoll_toad_encounters(ini_quoll_population, ini_toad_population, p, simulation_time)
+
+jpeg("invasion-graph.jpg")
+ggplot(final_invasion_population_encounter, aes(time_step)) +
+  geom_line(aes(y = alive_quolls, color = "Quolls")) +
+  geom_line(aes(y = alive_toads, color = "Toads")) +
+  labs(x = "Time Step", y = "Number of Individuals", title = "Cane Toad and Quoll Population Over Time") +
+  theme_minimal()
+dev.off()
+
+### Visualisation ----
+library(animation)
+library(plotrix)
+
+# Plot environment at a given time:
+plot_invasion_habitat <- function(habitat, p) {
+  area_quolls <- habitat$quoll_data[[1]]
+  area_toads <- habitat$toad_data[[1]]
+ 
+  plot(0, xlim = c(0, p$environment_x), ylim = c(0, p$environment_y), type = "n", axes = FALSE, ann = FALSE)
+  quoll_cols <- ifelse(area_quolls$alive, "brown", "grey")
+  toad_cols <- ifelse(area_toads$alive, "tan", "grey")
+
+  for (i in 1:nrow(area_quolls)) {
+    points(area_quolls$x[i], area_quolls$y[i], pch = 16, col = quoll_cols[i])
+  }
+  
+  for (i in 1:nrow(area_toads)) {
+    points(area_toads$x[i], area_toads$y[i], pch = 17, col = toad_cols[i])
+  }
+}
+
+# Plotting environment through time as a video
+invasionMovie <- function(final_invasion_population_encounter, p, interval = 0.25) {
+  ani.options(interval = interval)
+  for (i in 1:nrow(final_invasion_population_encounter)) {
+    dev.hold()
+    plot_invasion_habitat(final_invasion_population_encounter[i,], p)
+    text(x = 0, y = 1, adj = c(0, 1), label = paste0("time=", i),
+         col = "red", cex = 1.5)
+  }
+}
+
+invasionMovie(final_invasion_population_encounter, p, interval = 0.25)
+saveGIF(invasionMovie(final_invasion_population_encounter, p), movie.name = "invasion_movie.gif")
